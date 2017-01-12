@@ -295,12 +295,18 @@ do_get_module_info(M, basic) ->
   Info                         = erlang:get_module_info(M),
   {compile, Compile}           = lists:keyfind(compile, 1, Info),
   {exports, Exports}           = lists:keyfind(exports, 1, Info),
-  {time, {Y, Mo, D, H, Mi, S}} = lists:keyfind(time,    1, Compile),
+  Time = case lists:keyfind(time, 1, Compile) of
+           {time, {Y, Mo, D, H, Mi, S}} -> [{time, {{Y, Mo, D}, {H, Mi, S}}}];
+           false                        -> []
+         end,
+  MD5 = case lists:keyfind(md5, 1, Compile) of
+          {md5, _} = Value -> [Value];
+          false            -> []
+        end,
   {ok, ModSrc}                 = get_module_source(M, Info),
   [ {module, M}
   , {exports, [[{function, F}, {arity, A}] || {F, A} <- Exports]}
-  , {time, {{Y, Mo, D}, {H, Mi, S}}}
-  , {source, ModSrc}];
+  , {source, ModSrc}] ++ Time ++ MD5;
 do_get_module_info(M, detailed) ->
   {M, Bin, _File}                   = code:get_object_code(M),
   {ok, {M, Chunks}}                 = beam_lib:chunks(Bin, [abstract_code]),
@@ -525,17 +531,36 @@ load_mod(Mod, File) ->
   end.
 
 module_modified_p(Mod, File) ->
-  do_module_modified_p(lists:keyfind(time, 1, Mod:module_info(compile)),
-                       file:read_file_info(File)).
+  CompileInfo = Mod:module_info(compile),
+  MTimeFun = fun() ->
+                 {ok, Info} = file:read_file_info(File),
+                 Info#file_info.mtime
+             end,
+  MD5Fun = fun() ->
+               beam_lib:md5(File)
+           end,
+  do_module_modified_p(CompileInfo, MTimeFun, MD5Fun).
 
-do_module_modified_p(false, _MTime)                         -> true;
-do_module_modified_p(_CTime, {error, _})                    -> true;
-do_module_modified_p(CTime, {ok, #file_info{mtime = MTime}}) ->
-  {time, {CYear, CMonth, CDay, CHour, CMinute, CSecond}} = CTime,
+do_module_modified_p(CompileInfo, MTimeFun, MD5Fun) ->
+  case lists:keyfind(time, 1, CompileInfo) of
+    false ->
+      case lists:keyfind(md5, 1, CompileInfo) of
+        false       -> true;
+        {md5, Hash} ->
+          Hash =/= MD5Fun()
+      end;
+    {time, {_, _, _, _, _, _} = Time} ->
+      module_modified_by_mtime_p(Time, MTimeFun());
+    _ ->
+      true
+  end.
+
+module_modified_by_mtime_p(CTime, MTime) ->
+  {CYear, CMonth, CDay, CHour, CMinute, CSecond} = CTime,
   [UniversalMTime] = calendar:local_time_to_universal_time_dst(MTime),
-  CompileTime = {{CYear, CMonth, CDay}, {CHour, CMinute, CSecond}},
+  CompileDateTime = {{CYear, CMonth, CDay}, {CHour, CMinute, CSecond}},
   calendar:datetime_to_gregorian_seconds(UniversalMTime) >
-    calendar:datetime_to_gregorian_seconds(CompileTime).
+    calendar:datetime_to_gregorian_seconds(CompileDateTime).
 
 get_compile_outdir(File) ->
   Mod  = list_to_atom(filename:basename(filename:rootname(File))),
@@ -835,38 +860,78 @@ get_additional_includes_test_() ->
                                           [{i, filename:join(AppDir, "foo")}]))
    ]}.
 
-do_module_modified_p_test_() ->
-  Now = calendar:local_time(),
-  {{Year, Month, Day}, {Hour, Minute, Second} = Time} = Now,
+module_modified_p_test_() ->
+  NowMTime = calendar:local_time(),
+  {{Year, Month, Day}, {Hour, Minute, Second} = Time} = NowMTime,
+  NowCTimeInfo = [{time, {Year, Month, Day, Hour, Minute, Second}}],
 
-  NowMTime = #file_info{mtime = Now},
-  NowCTime = {time, {Year, Month, Day, Hour, Minute, Second}},
+  FutureMTime = {{Year + 1, Month, Day}, Time},
+  FutureCTimeInfo = [{time, {Year + 1, Month, Day, Hour, Minute, Second}}],
 
-  FutureMTime = #file_info{mtime = {{Year + 1, Month, Day}, Time}},
-  FutureCTime = {time, {Year + 1, Month, Day, Hour, Minute, Second}},
+  PastMTime = {{Year - 1, Month, Day}, Time},
+  PastCTimeInfo = [{time, {Year - 1, Month, Day, Hour, Minute, Second}}],
 
-  PastMTime = #file_info{mtime = {{Year - 1, Month, Day}, Time}},
-  PastCTime = {time, {Year - 1, Month, Day, Hour, Minute, Second}},
+  FileMD5 = 123,
+  MatchingMD5Info = [{md5, FileMD5}],
+  NonMatchingMD5Info = [{md5, FileMD5 + 1}],
 
-  [ ?_assert(do_module_modified_p(false, {ok, PastMTime})),
-    ?_assert(do_module_modified_p(false, {ok, NowMTime})),
-    ?_assert(do_module_modified_p(false, {ok, FutureMTime})),
+  [ ?_assert(do_module_modified_p([],
+                                  fun() -> PastMTime end,
+                                  fun() -> FileMD5 end)),
+    ?_assert(do_module_modified_p([],
+                                  fun() -> NowMTime end,
+                                  fun() -> FileMD5 end)),
+    ?_assert(do_module_modified_p([],
+                                  fun() -> NowMTime end,
+                                  fun() -> FileMD5 end)),
 
-    ?_assert(do_module_modified_p(PastCTime, {error, foo})),
-    ?_assert(do_module_modified_p(NowCTime, {error, foo})),
-    ?_assert(do_module_modified_p(FutureCTime, {error, foo})),
+    ?_assert(do_module_modified_p([{time, {error, foo}}],
+                                  fun() -> PastMTime end,
+                                  fun() -> FileMD5 end)),
+    ?_assert(do_module_modified_p([{time, {error, foo}}],
+                                  fun() -> NowMTime end,
+                                  fun() -> FileMD5 end)),
+    ?_assert(do_module_modified_p([{time, {error, foo}}],
+                                  fun() -> FutureMTime end,
+                                  fun() -> FileMD5 end)),
 
-    ?_assertNot(do_module_modified_p(PastCTime, {ok, PastMTime})),
-    ?_assert(do_module_modified_p(PastCTime, {ok, NowMTime})),
-    ?_assert(do_module_modified_p(PastCTime, {ok, FutureMTime})),
+    ?_assertNot(do_module_modified_p(PastCTimeInfo,
+                                  fun() -> PastMTime end,
+                                  fun() -> FileMD5 end)),
+    ?_assert(do_module_modified_p([{time, PastCTimeInfo}],
+                                  fun() -> NowMTime end,
+                                  fun() -> FileMD5 end)),
+    ?_assert(do_module_modified_p([{time, PastCTimeInfo}],
+                                  fun() -> FutureMTime end,
+                                  fun() -> FileMD5 end)),
 
-    ?_assertNot(do_module_modified_p(NowCTime, {ok, PastMTime})),
-    ?_assertNot(do_module_modified_p(NowCTime, {ok, NowMTime})),
-    ?_assert(do_module_modified_p(NowCTime, {ok, FutureMTime})),
+    ?_assertNot(do_module_modified_p(NowCTimeInfo,
+                                  fun() -> PastMTime end,
+                                  fun() -> FileMD5 end)),
+    ?_assertNot(do_module_modified_p(NowCTimeInfo,
+                                  fun() -> NowMTime end,
+                                  fun() -> FileMD5 end)),
+    ?_assert(do_module_modified_p(NowCTimeInfo,
+                                  fun() -> FutureMTime end,
+                                  fun() -> FileMD5 end)),
 
-    ?_assertNot(do_module_modified_p(FutureCTime, {ok, PastMTime})),
-    ?_assertNot(do_module_modified_p(FutureCTime, {ok, NowMTime})),
-    ?_assertNot(do_module_modified_p(FutureCTime, {ok, FutureMTime}))
+    ?_assertNot(do_module_modified_p(FutureCTimeInfo,
+                                  fun() -> PastMTime end,
+                                  fun() -> FileMD5 end)),
+    ?_assertNot(do_module_modified_p(FutureCTimeInfo,
+                                  fun() -> NowMTime end,
+                                  fun() -> FileMD5 end)),
+    ?_assertNot(do_module_modified_p(FutureCTimeInfo,
+                                  fun() -> FutureMTime end,
+                                  fun() -> FileMD5 end)),
+
+    ?_assertNot(do_module_modified_p(MatchingMD5Info,
+                                  fun() -> NowMTime end,
+                                  fun() -> FileMD5 end)),
+    ?_assert(do_module_modified_p(NonMatchingMD5Info,
+                                  fun() -> FutureMTime end,
+                                  fun() -> FileMD5 end))
+
   ].
 
 string_to_mfa_test_() ->
