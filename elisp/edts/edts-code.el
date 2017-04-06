@@ -27,7 +27,6 @@
 ;; done by Sebastian Weddmark Olsson.
 
 (require 'dash)
-(require 'eproject-extras)
 (require 'f)
 
 (require 'edts-api)

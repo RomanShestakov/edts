@@ -20,6 +20,7 @@
 (require 'em-glob)
 (require 'f)
 
+(require 'edts-mode)
 (require 'edts-project)
 (require 'edts-plugin)
 
@@ -30,30 +31,34 @@
   (f-join edts-test-directory "edts-test-project1")
   "Directory where EDTS edts-test-project1 is located")
 
-(defun edts-test-project1-modules ()
+(defun edts-test-project-directory (project)
+  (f-join edts-test-directory (s-concat "edts-test-project-" (symbol-name project))))
+
+(defun edts-test-project-module-files (project)
   "Return a list of all modules in edts-test-project1."
-  (file-expand-wildcards
-   (f-join edts-test-project1-directory "lib" "*" "src" "*.erl")))
+  (f-files (edts-test-project-directory project)
+           (lambda (file) (equal (f-ext file) "erl"))
+           t))
 
 (defun edts-test-cleanup ()
   (edts-log-debug "Doing test cleanup")
-  (setq eproject-attributes-alist nil)
+  (setq edts-project-attributes-alist nil)
   (edts-log-debug "Test cleanup done"))
 
 
-(defun edts-test-setup-project (root name config)
+(defun edts-test-setup-project (root name &optional config)
   "Create project with NAME and CONFIG in ROOT."
   (edts-project-write-config (f-join root ".edts")
-                             (append (list :name name) config)))
+                             (edts-alist-add :name name config)))
 
 (defun edts-test-teardown-project (root)
   "Kill all buffers of the project in ROOT and remove its config."
   (with-each-buffer-in-project (buf root)
       (kill-buffer buf))
   (f-delete (f-join root ".edts"))
-  (setf eproject-attributes-alist
+  (setf edts-project-attributes-alist
           (delete-if (lambda (x) (equal (car x) root))
-                     eproject-attributes-alist)))
+                     edts-project-attributes-alist)))
 
 (defvar edts-test-pre-test-buffer-list nil
   "The buffer list prior to running tests.")
@@ -62,22 +67,25 @@
   (interactive)
   (edts-shell-kill-all)
   (dolist (buf (buffer-list))
-    (when (and
-           (buffer-live-p buf)
-           edts-mode
-           (kill-buffer buf))
-      (edts-log-debug "Killed %s" buf)))
+    (let ((buffer-name (buffer-name buf)))
+      (when (and
+             (buffer-live-p buf)
+             (buffer-file-name buf)
+             (f-ancestor-of? edts-test-directory (buffer-file-name buf)))
+        (kill-buffer buf)
+        (edts-log-debug "Killed %s" buffer-name))))
   (setq edts-test-pre-test-buffer-list (buffer-list)))
 
 (defun edts-test-post-cleanup-all-buffers ()
   (interactive)
   (edts-shell-kill-all)
   (dolist (buf (buffer-list))
-    (when (and (buffer-live-p buf)
-               (buffer-file-name buf)
-               (not (member buf edts-test-pre-test-buffer-list)))
-          (kill-buffer buf)
-      (edts-log-debug "Killed %s" buf)))
+    (let ((buffer-name (buffer-name buf)))
+      (when (and (buffer-live-p buf)
+                 (buffer-file-name buf)
+                 (not (member buf edts-test-pre-test-buffer-list)))
+        (kill-buffer buf)
+        (edts-log-debug "Killed %s" buffer-name))))
   (setq edts-test-pre-test-buffer-list nil))
 
 (defmacro edts-test-case (suite name args desc &rest body)
@@ -170,5 +178,24 @@
         (when (cadr suite)
           (funcall (cadr suite) setup-res))
         test-res))))
+
+;;;;;;;;;;;;;;;;;;;;
+;; Tests
+
+(edts-test-case edts-test-suite edts-test-project-directory-test ()
+  "Project directory test"
+  (should (equal (f-join edts-test-directory "edts-test-project-project-1")
+                 (edts-test-project-directory 'project-1)))
+  (should (equal (f-join edts-test-directory "edts-test-project-otp-1")
+                 (edts-test-project-directory 'otp-1))))
+
+(edts-test-case edts-test-suite edts-test-project-module-files-test ()
+  "Project directory test"
+  (let ((lib-dir (f-join (edts-test-project-directory 'project-1) "lib")))
+    (should (equal (list (f-join lib-dir "one" "src" "one.erl")
+                         (f-join lib-dir "one" "src" "one_two.erl")
+                         (f-join lib-dir "two" "src" "two.erl"))
+                   (-sort 'string<
+                          (edts-test-project-module-files 'project-1))))))
 
 (provide 'edts-test)

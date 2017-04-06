@@ -26,7 +26,6 @@ $(PLUGINS):
 .PHONY: clean
 clean: $(PLUGINS:%=clean-%)
 	rm -rfv elisp/*/*.elc
-	$(MAKE) -C test/edts-test-project1 MAKEFLAGS="$(MAKEFLAGS)" clean
 	$(MAKE) -C lib/edts MAKEFLAGS="$(MAKEFLAGS)" clean
 
 .PHONY: $(PLUGINS:%=clean-%)
@@ -35,7 +34,6 @@ $(PLUGINS:%=clean-%):
 
 .PHONY: integration-tests
 integration-tests:
-	$(MAKE) -C test/edts-test-project1 MAKEFLAGS="$(MAKEFLAGS)"
 	$(EMACS) -Q --batch \
 	-L ${PWD} \
 	-l test/load-tests.el \
@@ -43,7 +41,6 @@ integration-tests:
 
 .PHONY: ert
 ert:
-	$(MAKE) -C test/edts-test-project1 MAKEFLAGS="$(MAKEFLAGS)"
 	$(EMACS) -Q --batch \
 	-L ${PWD} \
 	-l test/load-tests.el \

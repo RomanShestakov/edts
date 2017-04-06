@@ -17,6 +17,8 @@
 ;;
 ;; xref interaction code for EDTS
 
+(require 'dash)
+
 (require 'edts)
 (require 'edts-api)
 (require 'edts-code)
@@ -90,11 +92,12 @@ current buffer's file."
                      (edts-api-node-name))
     (when edts-xref-checks
       (let* ((mods nil))
-        (with-each-buffer-in-project (gen-sym) (eproject-root)
-          (let ((mod (ferl-get-module)))
-            (when mod
-              (edts-face-remove-overlays '(edts-xref))
-              (push mod mods))))
+        (edts-project-in-each-buffer
+         (lambda ()
+           (-when-let (mod (ferl-get-module))
+             (edts-face-remove-overlays '(edts-xref))
+             (push mod mods))
+           (edts-project-root)))
         (edts-xref-module-analysis-async mods)))))
 
 
@@ -110,10 +113,9 @@ buffer's directory, on the node related to that buffer."
   "Runs xref-checks for current buffer on the node related to that
 buffer's project."
   (interactive)
-  (let ((module (ferl-get-module)))
-    (when module
-      (edts-face-remove-overlays '(edts-xref))
-      (edts-xref-module-analysis-async (list module)))))
+  (-when-let (module (ferl-get-module))
+    (edts-face-remove-overlays '(edts-xref))
+    (edts-xref-module-analysis-async (list module))))
 
 (defun edts-xref-module-analysis-async (modules)
   "Run xref-checks on MODULE on the node associated with current buffer,
@@ -132,13 +134,16 @@ parsed response as the single argument"
   (let ((err-alist (edts-xref-apply-whitelists
                     (edts-code--issue-to-file-map analysis-res))))
     ;; Set the error list in each project-buffer
-    (with-each-buffer-in-project (gen-sym) (eproject-root)
-      (when (buffer-file-name)
-        (let ((errs (cdr (assoc (file-truename (buffer-file-name)) err-alist))))
-          (edts-code--set-issues 'edts-xref (list 'error errs))
-          (edts-face-update-buffer-mode-line (edts-code-buffer-status))
-          (when errs
-            (edts-code-display-error-overlays 'edts-xref errs)))))))
+    (edts-project-in-each-buffer
+     (lambda ()
+       (when (buffer-file-name)
+         (let* ((file-name (file-truename (buffer-file-name)))
+                (errs      (edts-alist-get file-name err-alist)))
+           (edts-code--set-issues 'edts-xref (list 'error errs))
+           (edts-face-update-buffer-mode-line (edts-code-buffer-status))
+           (when errs
+             (edts-code-display-error-overlays 'edts-xref errs))))
+       (edts-project-root)))))
 
 (defun edts-xref-apply-whitelists (errs)
   "ERRS is an alist of (FILE . FILE-ERRORS) where FILE is a filename and
@@ -157,12 +162,12 @@ returns the filtered ERRS alist."
 
 (defun edts-xref--desc-whitelisted-p (err)
   (let ((desc (cdr (assoc 'description err)))
-        (regexps (eproject-attribute :xref-error-whitelist)))
+        (regexps (edts-project-attribute :xref-error-whitelist)))
     (-any? (lambda (re) (string-match re desc)) regexps)))
 
 (defun edts-xref--file-whitelisted-p (err)
   (let ((file (cdr (assoc 'file err)))
-        (regexps (eproject-attribute :xref-file-whitelist)))
+        (regexps (edts-project-attribute :xref-file-whitelist)))
     (-any? (lambda (re) (string-match re file)) regexps)))
 
 
